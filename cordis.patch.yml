@@ -1,0 +1,20 @@
+# The @argszero/cordis-plugin-client-bundle-conflict-guard bundle patch.
+#
+# It needs no deployment-specific config to mount. With an empty config the
+# guard audits the composed boot graph, reports every top-level name declared by
+# more than one client bundle, and states what that declaration kind does when
+# the bundles meet.
+#
+#   - insert:
+#       - id: client-bundle-conflict-guard
+#         config:
+#           mode: report      # report (default); error also fails the guard's
+#                             # fiber when the boot audit finds a fatal collision
+#           chunks: true      # also scan package-local client.<name>.js chunks
+#
+# Inside a bundle whose patch already has rows, add the same `insert` entry
+# instead of a second document.
+
+- insert:
+    - id: client-bundle-conflict-guard
+      name: '@argszero/cordis-plugin-client-bundle-conflict-guard'

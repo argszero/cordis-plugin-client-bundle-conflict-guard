@@ -111,16 +111,20 @@ ctx.provide('webServer', { register: () => {}, routes: new Map() })
 const registry = new ClientModuleRegistry(ctx)
 const graph = registry.graph()
 const paths = graph.entries.map(entry => registry.clientPath(entry.id))
-apply(ctx, Config({}))
-ctx.emit('webserver/index-inject', [])
-rmSync(root, { recursive: true, force: true })
-
-console.log(JSON.stringify({
-  entries: graph.entries.length,
-  batches: graph.batches.length,
-  pathsResolved: paths.filter(path => typeof path === 'string' && path.endsWith('client.js')).length,
-  lines,
-}))
+try {
+  apply(ctx, Config({}))
+  ctx.emit('webserver/index-inject', [])
+  console.log(JSON.stringify({
+    entries: graph.entries.length,
+    batches: graph.batches.length,
+    pathsResolved: paths.filter(path => typeof path === 'string' && path.endsWith('client.js')).length,
+    lines,
+  }))
+} finally {
+  // A driver that throws used to leave its synthetic install tree behind on every
+  // failing line, so the probe leaked a directory per failure.
+  rmSync(root, { recursive: true, force: true })
+}
 `
 
 /** Run a command, returning stdout (trimmed) or throwing with the captured output. */
@@ -142,6 +146,13 @@ function probe(version, expect) {
   } catch (error) {
     rmSync(workdir, { recursive: true, force: true })
     const detail = String(error.message).split('\n').slice(0, 3).join(' ')
+    // A refusal that names the plugin itself is not a verdict about the line: the
+    // install never got far enough to consider the peer range.
+    if (detail.includes(manifest.name)) {
+      failures.push(version)
+      console.log(`FAIL ${version}: the failure names ${manifest.name} itself, so this says nothing about the line (${detail})`)
+      return
+    }
     if (expect === 'excluded') {
       console.log(`ok   ${version} is excluded — the install refuses it (${detail})`)
       return
@@ -194,6 +205,18 @@ function probe(version, expect) {
 }
 
 console.log(`line probe: ${published}\n`)
+
+// Preflight: the probe installs by name, so it can only say anything once the
+// registry serves the version under test. Without this check a not-yet-propagated
+// publish looks exactly like a line that is legitimately refused — every line
+// would "pass" for the wrong reason.
+const view = spawnSync('npm', ['view', published, 'version'], { encoding: 'utf8' })
+if (view.status !== 0 || (view.stdout ?? '').trim() !== manifest.version) {
+  console.error(`${published} is not installable by name yet (npm view says ${JSON.stringify((view.stdout ?? view.stderr ?? '').trim().split('\n')[0])}).`)
+  console.error('The registry has not propagated this version: an ETARGET here is a publishing fact, not a compatibility verdict. Re-run once `npm view` reports it.')
+  process.exit(2)
+}
+
 for (const version of excluded) probe(version, 'excluded')
 for (const version of included) probe(version, 'included')
 

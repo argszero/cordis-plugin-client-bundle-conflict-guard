@@ -146,11 +146,14 @@ function probe(version, expect) {
   } catch (error) {
     rmSync(workdir, { recursive: true, force: true })
     const detail = String(error.message).split('\n').slice(0, 3).join(' ')
-    // A refusal that names the plugin itself is not a verdict about the line: the
-    // install never got far enough to consider the peer range.
-    if (detail.includes(manifest.name)) {
+    // A failure that says the plugin *version* is unavailable is not a verdict
+    // about the line: the install never got far enough to consider the peer range.
+    // (An ERESOLVE refusal does name the plugin — it is the package being
+    // installed — so the discriminator has to be the missing-version wording,
+    // not the presence of the name.)
+    if (detail.includes(`No matching version found for ${manifest.name}`)) {
       failures.push(version)
-      console.log(`FAIL ${version}: the failure names ${manifest.name} itself, so this says nothing about the line (${detail})`)
+      console.log(`FAIL ${version}: ${manifest.name}@${manifest.version} is not resolvable, so this says nothing about the line (${detail})`)
       return
     }
     if (expect === 'excluded') {

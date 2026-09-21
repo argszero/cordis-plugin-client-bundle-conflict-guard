@@ -1,7 +1,7 @@
 {
   "name": "@argszero/cordis-plugin-client-bundle-conflict-guard",
   "description": "Client bundle conflict guard for dsh: the Web host concatenates the client bundles of every mounted plugin into one classic script per combo batch, with no per-bundle scope, so two bundles that declare the same name at their top level silently overwrite each other ('var'/'function') or make the whole script a SyntaxError ('let'/'const'/'class'). Mounted on the composed boot graph (ClientModuleRegistry.graph()/clientPath()), this plugin scans every bundle's top-level declarations, cross-checks them across the bundles that share a script, and names the colliding packages and identifiers in the host log — a failure that otherwise surfaces only as an unattributed browser SyntaxError. Source: discussion #7290. Compatible with the dsh 0.1.2, 0.1.3, 0.1.5 and 0.1.6 prerelease lines.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -71,6 +71,7 @@
     "pretest": "tsc",
     "prepublishOnly": "tsc",
     "test": "node --test \"test/*.spec.mjs\"",
-    "probe": "node scripts/probe-real-composition.mjs"
+    "probe": "node scripts/probe-real-composition.mjs",
+    "probe:lines": "node scripts/probe-lines.mjs"
   }
 }

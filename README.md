@@ -94,18 +94,32 @@ guessed at from the browser console.
 ## Requirements
 
 - `@deepseek-ai/cordis` ^4.0.2
-- `@deepseek-ai/dsh-client-modules` (the `clientModules` service; verified against
-  the 0.1.2-rc.1, 0.1.3-alpha.2, 0.1.5-rc.2 and 0.1.6-alpha.2 lines)
+- `@deepseek-ai/dsh-client-modules` (the `clientModules` service)
 - `@deepseek-ai/dsh-host-webserver` (optional: only the served-graph re-audit uses
   its `webserver/index-inject` event)
+
+The peer range admits the `0.1.2-rc.1`, `0.1.3-alpha.2`, `0.1.5-rc.2` and
+`0.1.6-alpha.2` lines, and that is measured rather than assumed: `npm run
+probe:lines` installs **the published version of this package** next to each
+line's `@deepseek-ai/dsh-client-modules` in a fresh directory, asserts the
+installed line is the one requested, and drives the real `ClientModuleRegistry`
+over three synthetic bundles — 9 checks per line, and the two lines the range
+must keep out (`0.1.1-rc.2`, `0.1.2-alpha.5`) are asserted to fail the install.
+A range is the one claim in this package that no local test can validate, because
+the publisher's own install tree already contains the version it was written
+against.
 
 ## Development
 
 ```sh
 npm install
-npm test        # unit tests + the packaging guard (runs tsc first)
-npm run probe   # end-to-end: the real ClientModuleRegistry over real bundles on disk
+npm test              # unit tests + the packaging guard (runs tsc first)
+npm run probe         # end-to-end: the real ClientModuleRegistry over real bundles on disk
+npm run probe:lines   # the published artifact against every claimed dsh line
 ```
+
+`npm run probe:lines` installs from the registry, so it only exercises versions
+that are published.
 
 ## Source
 

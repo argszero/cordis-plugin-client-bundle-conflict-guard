@@ -14,6 +14,20 @@ import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { apply, Config, inject, name } from '../lib/index.js'
 
+/**
+ * The registration line a real bundle carries. Every client bundle file registers
+ * its own row, and it does so at the file's top level — which is the whole reason
+ * a hand-written bundle can collide: the official preset puts the same call in a
+ * banner around the *body*, while a bundle that calls it from its own top level
+ * declares nothing at the top level only if it wraps itself. Fixtures get the
+ * realistic form (one registration statement, then the source at top level) so
+ * the declaration face and the registration face are exercised on the same files.
+ */
+function registration(id, chunk) {
+  const field = chunk === undefined ? '' : `chunk: ${JSON.stringify(chunk)}, `
+  return `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, ${field}factory: (require) => { return {} } })\n`
+}
+
 /** A package tree on disk: id → package-relative files. */
 function workspace(packages) {
   const root = mkdtempSync(join(tmpdir(), 'cbg-'))
@@ -21,7 +35,14 @@ function workspace(packages) {
   for (const [id, files] of Object.entries(packages)) {
     const directory = join(root, 'node_modules', ...id.split('/'), 'lib')
     mkdirSync(directory, { recursive: true })
-    for (const [file, source] of Object.entries(files)) writeFileSync(join(directory, file), source)
+    for (const [file, source] of Object.entries(files)) {
+      const isEntry = file === 'client.js'
+      const isChunk = !isEntry && /^client\..+\.js$/.test(file)
+      const owned = (isEntry || isChunk) && !source.includes('__ModuleLoader__')
+        ? registration(id, isChunk ? file : undefined) + source
+        : source
+      writeFileSync(join(directory, file), owned)
+    }
     paths.set(id, join(directory, 'client.js'))
   }
   return { root, paths, cleanup: () => rmSync(root, { recursive: true, force: true }) }
@@ -101,21 +122,27 @@ test('boot reports a same-script collision as fatal, naming both bundles', () =>
     assert.equal(mounted.at('warn').length, 1)
     assert.match(mounted.at('warn')[0], /"makeWidget" is declared at the top level of one combo script by 2 bundles: @scope\/a \(function\), @scope\/b \(const\)/)
     assert.match(mounted.at('warn')[0], /none of its bundles \(2 bundles\) registers/)
-    assert.deepEqual(mounted.at('info'), ['client-bundle-conflict-guard: boot composition — 2 client bundles declare 2 top-level names between them; 1 collide across bundles (1 fatal).'])
+    assert.deepEqual(mounted.at('info'), [
+      'client-bundle-conflict-guard: boot composition — 2 client bundles declare 2 top-level names between them; 1 collide across bundles (1 fatal).',
+      'client-bundle-conflict-guard: boot composition — 2 client bundle files declare 2 registration keys; 0 violate the contract.',
+    ])
     assert.deepEqual(mounted.at('debug'), [])
   } finally {
     space.cleanup()
   }
 })
 
-test('boot is quiet when the bundles scope themselves: one summary line and nothing else', () => {
+test('boot is quiet when the bundles scope themselves: two summary lines and nothing else', () => {
   const space = workspace({
     '@scope/a': { 'client.js': 'window.__ModuleLoader__.load({ id: "@scope/a", factory: (require) => { const local = 1; return {} } })\n' },
     '@scope/b': { 'client.js': 'window.__ModuleLoader__.load({ id: "@scope/b", factory: (require) => { const local = 2; return {} } })\n' },
   })
   try {
     const mounted = mount(space, [{ graph: boot(['@scope/a', '@scope/b']) }])
-    assert.deepEqual(mounted.lines, ['info: client-bundle-conflict-guard: boot composition — 2 client bundles declare 0 top-level names between them; 0 collide across bundles (0 fatal).'])
+    assert.deepEqual(mounted.lines, [
+      'info: client-bundle-conflict-guard: boot composition — 2 client bundles declare 0 top-level names between them; 0 collide across bundles (0 fatal).',
+      'info: client-bundle-conflict-guard: boot composition — 2 client bundle files declare 2 registration keys; 0 violate the contract.',
+    ])
   } finally {
     space.cleanup()
   }
@@ -129,7 +156,7 @@ test('a silent collision is reported at info, not as a failure', () => {
   try {
     const mounted = mount(space, [{ graph: boot(['@scope/a', '@scope/b']) }])
     assert.deepEqual(mounted.at('warn'), [])
-    assert.equal(mounted.at('info').length, 2)
+    assert.equal(mounted.at('info').length, 3, 'the silent collision plus the two boot summaries')
     assert.match(mounted.at('info')[0], /No error: `var` and `function` declarations only replace each other/)
   } finally {
     space.cleanup()
@@ -153,13 +180,13 @@ test('a graph change reports what appeared and what cleared, once each', () => {
     // Same collision, new revision: no repeat, and a change summary only if the set changed.
     mounted.registry.advance()
     assert.equal(mounted.at('warn').length, 1)
-    assert.equal(mounted.at('info').length, 1, 'an unchanged collision set logs no second summary')
+    assert.equal(mounted.at('info').length, 2, 'an unchanged collision set logs no second summary')
 
     mounted.registry.advance()
     assert.equal(mounted.at('warn').length, 2, 'the third bundle joins the collision and is reported again')
     assert.match(mounted.at('warn')[1], /@scope\/a \(const\), @scope\/b \(const\), @scope\/c \(const\)/)
-    assert.equal(mounted.at('info').length, 2)
-    assert.match(mounted.at('info')[1], /graph change — 3 client bundles declare 3 top-level names between them; 1 collide across bundles \(1 fatal\)\./)
+    assert.equal(mounted.at('info').length, 3)
+    assert.match(mounted.at('info')[2], /graph change — 3 client bundles declare 3 top-level names between them; 1 collide across bundles \(1 fatal\)\./)
   } finally {
     space.cleanup()
   }
@@ -191,12 +218,13 @@ test('the served graph is audited once per revision', () => {
       { graph: boot(['@scope/a'], 'rev-2') },
     ])
     mounted.serve()
-    assert.equal(mounted.at('info').length, 1, 'the boot summary is the served summary while the revision is unchanged')
+    assert.equal(mounted.at('info').length, 2, 'the boot summaries are the served summaries while the revision is unchanged')
     mounted.registry.advance()
     mounted.serve()
     mounted.serve()
-    assert.deepEqual(mounted.at('info').slice(1), [
+    assert.deepEqual(mounted.at('info').slice(2), [
       'client-bundle-conflict-guard: served graph — 1 client bundles declare 1 top-level names between them; 0 collide across bundles (0 fatal).',
+      'client-bundle-conflict-guard: served graph — 1 client bundle files declare 1 registration keys; 0 violate the contract.',
     ])
   } finally {
     space.cleanup()
@@ -225,6 +253,47 @@ test('chunk scanning can be turned off', () => {
     const mounted = mount(space, [{ graph: boot(['@scope/a']) }], { chunks: false })
     assert.deepEqual(mounted.at('warn'), [])
     assert.match(mounted.at('info')[0], /1 client bundles declare 1 top-level names between them/)
+  } finally {
+    space.cleanup()
+  }
+})
+
+test('a bundle that registers the wrong key is reported at warn, and the coverage is stated', () => {
+  const space = workspace({
+    '@scope/a': { 'client.js': 'window.__ModuleLoader__.load({ id: "@scope/renamed", factory: (require) => { return {} } })\n' },
+  })
+  try {
+    const mounted = mount(space, [{ graph: boot(['@scope/a']) }])
+    const warns = mounted.at('warn')
+    assert.equal(warns.length, 1)
+    assert.match(warns[0], /client-bundle-conflict-guard: "@scope\/a" registers the key "@scope\/renamed" but its graph row requires "@scope\/a"/)
+    assert.match(warns[0], /browser half is absent, with no host-side failure/)
+    assert.ok(
+      mounted.at('info').includes('client-bundle-conflict-guard: boot composition — 1 client bundle files declare 1 registration keys; 1 violate the contract.'),
+      'the coverage line counts the violation',
+    )
+  } finally {
+    space.cleanup()
+  }
+})
+
+test('a registration violation that clears is announced as gone, and never fails error mode', () => {
+  const space = workspace({
+    '@scope/a': { 'client.js': 'window.__ModuleLoader__.load({ id: "@scope/wrong", factory: (require) => { return {} } })\n' },
+  })
+  try {
+    const mounted = mount(space, [
+      { graph: boot(['@scope/a'], 'rev-1') },
+      { graph: boot(['@scope/a'], 'rev-2') },
+    ], { mode: 'error' })
+    assert.equal(mounted.at('warn').length, 1, 'the wrong key is reported, and error mode does not throw on it')
+    // The rebuild fixes the key: the same revision is re-audited, the bytes are not cached across it.
+    writeFileSync(space.paths.get('@scope/a'), 'window.__ModuleLoader__.load({ id: "@scope/a", factory: (require) => { return {} } })\n')
+    mounted.registry.advance()
+    assert.ok(
+      mounted.at('info').some(line => line.includes('client-bundle-conflict-guard: "unregistered:@scope/a" no longer violates the registration contract: the composition changed.')),
+      'the cleared violation is named',
+    )
   } finally {
     space.cleanup()
   }
@@ -264,7 +333,7 @@ test('the audit is cached per graph revision, so a served graph is not re-read p
     mounted.serve()
     mounted.serve()
     assert.equal(mounted.at('warn').length, 1)
-    assert.equal(mounted.at('info').length, 1)
+    assert.equal(mounted.at('info').length, 2, 'both boot summaries, and no re-read')
   } finally {
     space.cleanup()
   }

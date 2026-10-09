@@ -33,6 +33,14 @@
  * that more than one of them declares, naming the bundles and stating what that
  * declaration kind does when they meet.
  *
+ * It audits a second, independent contract on the same bytes: the registration
+ * key each bundle passes to `__ModuleLoader__.load({ id })`, which the browser
+ * module table requires to equal the package's own graph row
+ * (`registration.ts` documents both ways that can go wrong — a key that matches
+ * no row, and one key claimed twice — and why both leave the plugin silently
+ * absent). The two faces are reported separately, because they fail through
+ * different mechanisms and only one of them is a JavaScript scoping question.
+ *
  * What it deliberately is not: a fix. The composition is the only place that can
  * give a bundle a scope, and this guard runs on the host, after composition, with
  * no reach into the browser. It **names the collision, it cannot prevent it**;
@@ -54,6 +62,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import { analyzeComposition, describeCollision, summarizeAudit } from './analyze.js'
 import type { BundleSource, Collision, CompositionAudit } from './analyze.js'
+import { analyzeRegistrations, describeRegistrationFinding, summarizeRegistrations } from './registration.js'
+import type { RegistrationAudit, RegistrationFinding } from './registration.js'
 
 /** Cordis plugin name. */
 export const name = 'client-bundle-conflict-guard'
@@ -68,7 +78,9 @@ export interface Config {
    * plugin's fiber when the boot-time audit finds a collision that is fatal
    * (`let`, `const` or `class` against any other declaration of the same name),
    * for a deployment that wants an unusable client bundle to stop the boot
-   * audit rather than appear in it.
+   * audit rather than appear in it. Registration-contract violations are never
+   * fatal here: they cost one plugin its browser half, which is exactly the kind
+   * of finding a boot-time audit exists to report rather than to fail on.
    */
   mode?: 'report' | 'error'
   /**
@@ -132,11 +144,15 @@ export function apply(ctx: Context, config: Config): void {
   const mode = config.mode ?? 'report'
   const includeChunks = config.chunks !== false
   /** The last audit, keyed by the graph revision it describes. */
-  let cached: { readonly rev: string; readonly audit: CompositionAudit } | undefined
+  let cached: { readonly rev: string; readonly audit: CompositionAudit; readonly registrations: RegistrationAudit } | undefined
   /** Revision the composition summary was last announced for, whichever vantage announced it. */
   let announcedRev: string | undefined
+  /** Revision the registration summary was last announced for. */
+  let announcedRegistrationRev: string | undefined
   /** Collisions already reported: name → the sentence that was logged for it. */
   const reported = new Map<string, string>()
+  /** Registration violations already reported: `severity:key` → the sentence that was logged for it. */
+  const reportedRegistrations = new Map<string, string>()
 
   /** Read one bundle file, recording the failure instead of throwing. */
   const readBundle = (id: string, path: string, kind: 'entry' | 'chunk', problems: Problem[]): BundleSource | undefined => {
@@ -180,7 +196,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** Audit one graph, reading bundle bytes only for it. */
-  const scan = (graph: WebBootGraph): CompositionAudit => {
+  const scan = (graph: WebBootGraph): { readonly audit: CompositionAudit; readonly registrations: RegistrationAudit } => {
     const problems: Problem[] = []
     const bundles: BundleSource[] = []
     for (const entry of graph.entries) bundles.push(...filesOf(graph, entry.id, problems))
@@ -189,13 +205,15 @@ export function apply(ctx: Context, config: Config): void {
       if (problem.kind === 'entry') ctx.logger.warn(`client-bundle-conflict-guard: cannot scan ${detail}`)
       else ctx.logger.debug(`client-bundle-conflict-guard: cannot scan chunk of ${detail}`)
     }
-    return analyzeComposition(graph, bundles)
+    return { audit: analyzeComposition(graph, bundles), registrations: analyzeRegistrations(bundles) }
   }
 
   /** The audit of the graph as it stands, reused while the graph revision is unchanged. */
-  const audit = (): { readonly rev: string; readonly audit: CompositionAudit } => {
+  const audit = (): { readonly rev: string; readonly audit: CompositionAudit; readonly registrations: RegistrationAudit } => {
     const graph = ctx.clientModules.graph()
-    if (cached === undefined || cached.rev !== graph.rev) cached = { rev: graph.rev, audit: scan(graph) }
+    if (cached === undefined || cached.rev !== graph.rev) {
+      cached = { rev: graph.rev, ...scan(graph) }
+    }
     return cached
   }
 
@@ -206,9 +224,14 @@ export function apply(ctx: Context, config: Config): void {
     else ctx.logger.warn(line)
   }
 
+  /** Report one registration violation: both kinds cost a plugin its browser half. */
+  const reportRegistration = (finding: RegistrationFinding): void => {
+    ctx.logger.warn(`client-bundle-conflict-guard: ${describeRegistrationFinding(finding)}`)
+  }
+
   /** Audit the graph and log what changed since the last check. */
   const check = (vantage: Vantage): void => {
-    const { rev, audit: result } = audit()
+    const { rev, audit: result, registrations } = audit()
     const appeared: Collision[] = []
     const seen = new Set<string>()
     for (const collision of result.collisions) {
@@ -226,6 +249,29 @@ export function apply(ctx: Context, config: Config): void {
       cleared.push(name)
     }
     for (const name of cleared) ctx.logger.info(`client-bundle-conflict-guard: "${name}" no longer collides: the composition changed.`)
+    // The registration contract is the second, independent way a mounted client
+    // plugin can end up absent from the page, and it is reported the same way:
+    // once per violation, and only when the violation set moves.
+    const appearedRegistrations: RegistrationFinding[] = []
+    const seenRegistrations = new Set<string>()
+    for (const finding of registrations.findings) {
+      const identity = `${finding.severity}:${finding.key}`
+      const sentence = describeRegistrationFinding(finding)
+      seenRegistrations.add(identity)
+      if (reportedRegistrations.get(identity) === sentence) continue
+      reportedRegistrations.set(identity, sentence)
+      appearedRegistrations.push(finding)
+      reportRegistration(finding)
+    }
+    const clearedRegistrations: string[] = []
+    for (const identity of [...reportedRegistrations.keys()]) {
+      if (seenRegistrations.has(identity)) continue
+      reportedRegistrations.delete(identity)
+      clearedRegistrations.push(identity)
+    }
+    for (const identity of clearedRegistrations) {
+      ctx.logger.info(`client-bundle-conflict-guard: "${identity}" no longer violates the registration contract: the composition changed.`)
+    }
     // The boot line always states what the composition holds; a change states it
     // only when the finding changed; the served graph states it once per revision,
     // so a page reload is not a new report.
@@ -235,6 +281,15 @@ export function apply(ctx: Context, config: Config): void {
     if (announce) {
       ctx.logger.info(`client-bundle-conflict-guard: ${VANTAGE_LABEL[vantage]} — ${summarizeAudit(result)}`)
       announcedRev = rev
+    }
+    // The registration coverage is stated on its own line for the same reason:
+    // a clean audit has to be distinguishable from an audit that never ran.
+    const announceRegistrations = vantage === 'boot'
+      || (vantage === 'change' && (appearedRegistrations.length > 0 || clearedRegistrations.length > 0))
+      || (vantage === 'serve' && announcedRegistrationRev !== rev)
+    if (announceRegistrations) {
+      ctx.logger.info(`client-bundle-conflict-guard: ${VANTAGE_LABEL[vantage]} — ${summarizeRegistrations(registrations)}`)
+      announcedRegistrationRev = rev
     }
     if (mode === 'error' && vantage === 'boot') {
       const fatal = result.collisions.filter(collision => collision.severity !== 'silent')

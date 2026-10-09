@@ -80,8 +80,15 @@ export function isLexical(keyword: DeclarationKeyword): boolean {
   return keyword === 'let' || keyword === 'const' || keyword === 'class'
 }
 
-/** One lexical token; verbatim values are kept for the punctuation this scanner reasons about. */
-interface Token {
+/**
+ * One lexical token; verbatim values are kept for the punctuation this scanner
+ * reasons about. Exported because string, template and regular-expression
+ * handling is the part a second reader must not re-derive: `registration.ts`
+ * walks the same token stream to find call sites, so a `load({ id: ... })` that
+ * appears inside a comment, a string or a template can never be mistaken for
+ * one.
+ */
+export interface Token {
   readonly type: 'name' | 'punct' | 'number' | 'string' | 'template' | 'regex'
   readonly value: string
   /** True when a line terminator separates this token from the previous one. */
@@ -274,7 +281,13 @@ function skipNumber(source: string, index: number): number {
 }
 
 /** Tokenize JavaScript, skipping comments and keeping line breaks as token metadata. */
-function tokenize(source: string): Token[] {
+/**
+ * Tokenize one source file, skipping comments and keeping strings, templates and
+ * regular expressions as single tokens.
+ * @param source - file text.
+ * @returns the token stream, comments and whitespace removed.
+ */
+export function tokenize(source: string): Token[] {
   const tokens: Token[] = []
   const length = source.length
   let index = 0

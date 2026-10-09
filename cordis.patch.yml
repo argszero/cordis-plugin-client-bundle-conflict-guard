@@ -1,9 +1,13 @@
 # The @argszero/cordis-plugin-client-bundle-conflict-guard bundle patch.
 #
 # It needs no deployment-specific config to mount. With an empty config the
-# guard audits the composed boot graph, reports every top-level name declared by
-# more than one client bundle, and states what that declaration kind does when
-# the bundles meet.
+# guard audits the composed boot graph and reports two independent failures:
+#
+#   - every top-level name declared by more than one client bundle, and what that
+#     declaration kind does when the bundles meet in one combo script;
+#   - every client bundle whose __ModuleLoader__.load() registration does not
+#     produce the key its graph row waits for (a wrong id, a missing call, or one
+#     key claimed by two registrations).
 #
 #   - insert:
 #       - id: client-bundle-conflict-guard

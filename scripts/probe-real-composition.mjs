@@ -46,6 +46,9 @@ const packages = [
   // Two bundles that register from their own top level and share a lexical name.
   package_('@probe/bare-a', 'const makeWidget = 1\nwindow.__ModuleLoader__.load({ id: "@probe/bare-a", factory: () => ({}) })\n'),
   package_('@probe/bare-b', 'class makeWidget {}\nwindow.__ModuleLoader__.load({ id: "@probe/bare-b", factory: () => ({}) })\n'),
+  // A bundle whose registration key is not its row id: the row it was served for
+  // never enters the module table, and only the host log says so.
+  package_('@probe/misnamed', 'window.__ModuleLoader__.load({ id: "@probe/misnamed-typo", factory: () => ({}) })\n'),
 ]
 
 /** The loader surface the registry reads: entries, and specifier resolution. */
@@ -93,11 +96,14 @@ const check = (label, condition) => {
   console.log(`${condition ? 'ok  ' : 'FAIL'} ${label}`)
   if (!condition) failures.push(label)
 }
-check('the registry composed three bundles', registry.graph().entries.length === 3)
-check('the wrapped bundle contributes no declaration', lines.some(line => line.includes('3 client bundles declare 2 top-level names')))
+check('the registry composed four bundles', registry.graph().entries.length === 4)
+check('the wrapped bundle contributes no declaration', lines.some(line => line.includes('4 client bundles declare 2 top-level names')))
 check('the collision is reported as fatal and names both packages', lines.some(line => line.includes('warn: ') && line.includes('"makeWidget"') && line.includes('@probe/bare-a (const)') && line.includes('@probe/bare-b (class)')))
-check('the summary line states the served composition', lines.some(line => line.includes('boot composition — 3 client bundles')))
+check('the summary line states the served composition', lines.some(line => line.includes('boot composition — 4 client bundles')))
 check('the non-fatal case is not reported as fatal', !lines.some(line => line.includes('"hidden"')))
+check('the registration coverage line counts every bundle', lines.some(line => line.includes('4 client bundle files declare 4 registration keys; 1 violate the contract')))
+check('the misnamed registration is named with both keys', lines.some(line => line.includes('"@probe/misnamed" registers the key "@probe/misnamed-typo"') && line.includes('requires "@probe/misnamed"')))
+check('the registration miss is attributed to the absent browser half', lines.some(line => line.includes('browser half is absent, with no host-side failure')))
 
 rmSync(root, { recursive: true, force: true })
 if (failures.length > 0) {

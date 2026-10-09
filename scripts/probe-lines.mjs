@@ -16,18 +16,24 @@
  *      and `@deepseek-ai/dsh-client-modules@<line>` into a fresh directory;
  *   2. asserts the installed line is the requested one (a probe that silently
  *      tested the newest version would prove nothing);
- *   3. writes three synthetic npm-shaped client packages on disk — one that wraps
+ *   3. writes four synthetic npm-shaped client packages on disk — one that wraps
  *      itself in the official closure factory, two bare ones that share a lexical
- *      declaration — and runs the real registry plus the plugin over them;
+ *      declaration, one that registers a key other than its row id — and runs the
+ *      real registry plus the plugin over them;
  *   4. asserts the plugin's log answers: the wrapped bundle contributes nothing,
  *      the collision is named with both packages and both declaration kinds, the
- *      summary line counts the composition, and the non-fatal case is not called
- *      fatal.
+ *      summary line counts the composition, the non-fatal case is not called
+ *      fatal, and the misnamed registration is reported with both keys.
  *
  * Included lines must pass all four checks; excluded lines must fail to install
  * at all (that is what "not supported" means for a peer dependency).
  *
  * Run: node scripts/probe-lines.mjs [--with <version>]... [--without <version>]...
+ *
+ * `--package <tarball|directory>` probes that artifact instead of the published
+ * one, which is how the same evidence is obtained before a publish: the registry
+ * preflight is skipped, because the install never consults it for the plugin.
+ * The harness lines still come from the registry either way.
  */
 
 import { spawnSync } from 'node:child_process'
@@ -49,6 +55,11 @@ const argv = process.argv.slice(2)
 const flag = name => argv.reduce((found, value, index) => (value === name ? [...found, argv[index + 1]] : found), [])
 for (const version of flag('--with')) included.push(version)
 for (const version of flag('--without')) excluded.push(version)
+
+/** The artifact under test: the published version, or a local one for a dry run. */
+const target = flag('--package')[0] ?? published
+/** Whether the plugin comes from the registry, which is the only case the preflight speaks about. */
+const fromRegistry = target === published
 
 /**
  * Driver executed *inside* the installed tree, so `@deepseek-ai/cordis`,
@@ -82,6 +93,10 @@ const packages = [
   makePackage('@probe/wrapped', 'window.__ModuleLoader__.load({ id: "@probe/wrapped", factory: (require) => { const hidden = 1; return {} } })\n'),
   makePackage('@probe/bare-a', 'const makeWidget = 1\nwindow.__ModuleLoader__.load({ id: "@probe/bare-a", factory: () => ({}) })\n'),
   makePackage('@probe/bare-b', 'class makeWidget {}\nwindow.__ModuleLoader__.load({ id: "@probe/bare-b", factory: () => ({}) })\n'),
+  // Registers a key that is not its row id, which is the second contract this
+  // plugin audits: the row never enters the module table, and the host log is the
+  // only place that says so.
+  makePackage('@probe/misnamed', 'window.__ModuleLoader__.load({ id: "@probe/misnamed-typo", factory: () => ({}) })\n'),
 ]
 
 const entries = packages.map(entry => ({
@@ -142,7 +157,7 @@ function probe(version, expect) {
   writeFileSync(join(workdir, 'package.json'), JSON.stringify({ name: 'line-probe', private: true, type: 'module' }))
   let installed
   try {
-    installed = run('npm', ['install', published, `@deepseek-ai/dsh-client-modules@${version}`, '--no-audit', '--no-fund'], workdir)
+    installed = run('npm', ['install', target, `@deepseek-ai/dsh-client-modules@${version}`, '--no-audit', '--no-fund'], workdir)
   } catch (error) {
     rmSync(workdir, { recursive: true, force: true })
     const detail = String(error.message).split('\n').slice(0, 3).join(' ')
@@ -153,7 +168,7 @@ function probe(version, expect) {
     // not the presence of the name.)
     if (detail.includes(`No matching version found for ${manifest.name}`)) {
       failures.push(version)
-      console.log(`FAIL ${version}: ${manifest.name}@${manifest.version} is not resolvable, so this says nothing about the line (${detail})`)
+      console.log(`FAIL ${version}: ${target} is not resolvable, so this says nothing about the line (${detail})`)
       return
     }
     if (expect === 'excluded') {
@@ -192,14 +207,17 @@ function probe(version, expect) {
     return
   }
   checks.push(['the install resolved the requested line', resolved === version, resolved])
-  checks.push(['the published plugin is the one under test', pluginVersion === manifest.version, pluginVersion])
-  checks.push(['the registry composed three bundles', report.entries === 3, report.entries])
-  checks.push(['every bundle resolved to real bytes', report.pathsResolved === 3, report.pathsResolved])
-  checks.push(['the closure-factory bundle contributes no declaration', report.lines.some(line => line.includes('3 client bundles declare 2 top-level names')), true])
+  checks.push(['the artifact under test is the built one', pluginVersion === manifest.version, pluginVersion])
+  checks.push(['the registry composed four bundles', report.entries === 4, report.entries])
+  checks.push(['every bundle resolved to real bytes', report.pathsResolved === 4, report.pathsResolved])
+  checks.push(['the closure-factory bundle contributes no declaration', report.lines.some(line => line.includes('4 client bundles declare 2 top-level names')), true])
   checks.push(['the collision is named with both packages and both kinds', report.lines.some(line => line.includes('"makeWidget"') && line.includes('@probe/bare-a (const)') && line.includes('@probe/bare-b (class)')), true])
   checks.push(['the fatal consequence is stated', report.lines.some(line => line.includes('SyntaxError')), true])
   checks.push(['the non-fatal name is not reported', !report.lines.some(line => line.includes('"hidden"')), true])
-  checks.push(['the summary line counts the composition', report.lines.some(line => line.includes('boot composition — 3 client bundles')), true])
+  checks.push(['the summary line counts the composition', report.lines.some(line => line.includes('boot composition — 4 client bundles')), true])
+  checks.push(['the registration coverage line counts every bundle', report.lines.some(line => line.includes('4 client bundle files declare 4 registration keys; 1 violate the contract')), true])
+  checks.push(['the misnamed registration is named with both keys', report.lines.some(line => line.includes('"@probe/misnamed" registers the key "@probe/misnamed-typo"') && line.includes('requires "@probe/misnamed"')), true])
+  checks.push(['the registration miss is attributed to the absent browser half', report.lines.some(line => line.includes('browser half is absent, with no host-side failure')), true])
 
   const broken = checks.filter(([, ok]) => !ok)
   if (broken.length > 0) failures.push(version)
@@ -207,17 +225,19 @@ function probe(version, expect) {
   for (const [label, ok, actual] of broken) console.log(`       ${label} (got ${JSON.stringify(actual)})`)
 }
 
-console.log(`line probe: ${published}\n`)
+console.log(`line probe: ${target}${fromRegistry ? '' : ' (local artifact)'}\n`)
 
 // Preflight: the probe installs by name, so it can only say anything once the
 // registry serves the version under test. Without this check a not-yet-propagated
 // publish looks exactly like a line that is legitimately refused — every line
 // would "pass" for the wrong reason.
-const view = spawnSync('npm', ['view', published, 'version'], { encoding: 'utf8' })
-if (view.status !== 0 || (view.stdout ?? '').trim() !== manifest.version) {
-  console.error(`${published} is not installable by name yet (npm view says ${JSON.stringify((view.stdout ?? view.stderr ?? '').trim().split('\n')[0])}).`)
-  console.error('The registry has not propagated this version: an ETARGET here is a publishing fact, not a compatibility verdict. Re-run once `npm view` reports it.')
-  process.exit(2)
+if (fromRegistry) {
+  const view = spawnSync('npm', ['view', published, 'version'], { encoding: 'utf8' })
+  if (view.status !== 0 || (view.stdout ?? '').trim() !== manifest.version) {
+    console.error(`${published} is not installable by name yet (npm view says ${JSON.stringify((view.stdout ?? view.stderr ?? '').trim().split('\n')[0])}).`)
+    console.error('The registry has not propagated this version: an ETARGET here is a publishing fact, not a compatibility verdict. Re-run once `npm view` reports it.')
+    process.exit(2)
+  }
 }
 
 for (const version of excluded) probe(version, 'excluded')
